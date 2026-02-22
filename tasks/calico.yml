@@ -1,0 +1,74 @@
+---
+# ---------------------------------------------------
+# Ensure execution only from first control plane
+# ---------------------------------------------------
+
+- name: Set first control plane
+  ansible.builtin.set_fact:
+    first_control_plane: "{{ groups['control_plane'][0] }}"
+
+- name: Skip if not first control plane
+  ansible.builtin.meta: end_host
+  when: inventory_hostname != first_control_plane
+
+# ---------------------------------------------------
+# Check if Calico already installed (Idempotency)
+# ---------------------------------------------------
+
+- name: Check if calico namespace exists
+  ansible.builtin.command: kubectl get ns calico-system --no-headers
+  register: calico_ns_check
+  failed_when: false
+  changed_when: false
+
+# ---------------------------------------------------
+# Download Official Calico Manifest
+# ---------------------------------------------------
+
+- name: Download Calico manifest
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml
+    dest: /tmp/calico.yaml
+    mode: '0644'
+  when: calico_ns_check.rc != 0
+
+# ---------------------------------------------------
+# Apply Calico Manifest
+# ---------------------------------------------------
+
+- name: Apply Calico CNI
+  ansible.builtin.command: kubectl apply -f /tmp/calico.yaml
+  register: calico_apply
+  changed_when: "'created' in calico_apply.stdout or 'configured' in calico_apply.stdout"
+  when: calico_ns_check.rc != 0
+
+# ---------------------------------------------------
+# Wait for Calico Pods to be Ready
+# ---------------------------------------------------
+
+- name: Wait for calico pods to be ready
+  ansible.builtin.command: >
+    kubectl wait --for=condition=Ready pod
+    --all
+    -n calico-system
+    --timeout=300s
+  register: calico_ready
+  retries: 5
+  delay: 20
+  until: calico_ready.rc == 0
+  when: calico_ns_check.rc != 0
+
+# ---------------------------------------------------
+# Validate All Nodes Become Ready
+# ---------------------------------------------------
+
+- name: Wait until all nodes are Ready
+  ansible.builtin.command: kubectl get nodes --no-headers
+  register: node_status
+  retries: 20
+  delay: 15
+  until: >
+    node_status.stdout_lines |
+    select("search", "NotReady") |
+    list | length == 0
+  changed_when: false

@@ -1,0 +1,69 @@
+---
+# ---------------------------------------------------
+# Identify first control plane
+# ---------------------------------------------------
+
+- name: Set fact for first control plane
+  ansible.builtin.set_fact:
+    first_control_plane: "{{ groups['control_plane'][0] }}"
+
+# ---------------------------------------------------
+# Skip first control plane
+# ---------------------------------------------------
+
+- name: Skip if first control plane
+  ansible.builtin.meta: end_host
+  when: inventory_hostname == first_control_plane
+
+# ---------------------------------------------------
+# Check if node already part of cluster
+# ---------------------------------------------------
+
+- name: Check if node already joined
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
+# If kubelet.conf exists → node already joined
+# Safe idempotency mechanism
+
+# ---------------------------------------------------
+# Retrieve join command from first control plane
+# ---------------------------------------------------
+
+- name: Read control plane join command from first node
+  ansible.builtin.slurp:
+    src: /etc/kubernetes/join/control_plane_join.sh
+  delegate_to: "{{ first_control_plane }}"
+  register: cp_join_raw
+  when: not kubelet_conf.stat.exists
+
+- name: Decode join command
+  ansible.builtin.set_fact:
+    cp_join_command: "{{ cp_join_raw.content | b64decode }}"
+  when: not kubelet_conf.stat.exists
+
+# ---------------------------------------------------
+# Join Control Plane
+# ---------------------------------------------------
+
+- name: Join node as control plane
+  ansible.builtin.command: >
+    {{ cp_join_command }}
+  when: not kubelet_conf.stat.exists
+  register: cp_join_result
+  notify: Restart kubelet
+
+# ---------------------------------------------------
+# Ensure kubelet enabled and running
+# ---------------------------------------------------
+
+- name: Ensure kubelet enabled
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: true
+
+- name: Ensure kubelet running
+  ansible.builtin.systemd:
+    name: kubelet
+    state: started

@@ -1,0 +1,12 @@
+Port {{ ssh_port }}
+Protocol 2
+PermitRootLogin {{ ssh_permit_root_login }}
+PasswordAuthentication {{ ssh_password_authentication }}
+ChallengeResponseAuthentication no
+UsePAM yes
+X11Forwarding no
+AllowTcpForwarding no
+ClientAliveInterval 300
+ClientAliveCountMax 2
+AllowUsers {% if ssh_allowed_users|length > 0 %}{{ ssh_allowed_users | join(' ') }}{% endif %}
+Subsystem sftp /usr/lib/openssh/sftp-server

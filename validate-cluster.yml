@@ -1,0 +1,115 @@
+---
+- name: Kubernetes Cluster Validation
+  hosts: all
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+
+  vars:
+    kubeconfig_path: /etc/kubernetes/admin.conf
+    required_ports:
+      control_plane:
+        - 6443
+        - 2379
+        - 2380
+        - 10250
+        - 10257
+        - 10259
+      worker:
+        - 10250
+        - 30000-32767
+
+  tasks:
+
+  ####################################################################
+  # 1️⃣ Validate container runtime
+  ####################################################################
+  - name: Check containerd service status
+    ansible.builtin.systemd:
+      name: containerd
+    register: containerd_status
+
+  - name: Fail if containerd not active
+    ansible.builtin.fail:
+      msg: "containerd is not running on {{ inventory_hostname }}"
+    when: containerd_status.status.ActiveState != "active"
+
+  ####################################################################
+  # 2️⃣ Validate kubelet
+  ####################################################################
+  - name: Check kubelet service status
+    ansible.builtin.systemd:
+      name: kubelet
+    register: kubelet_status
+
+  - name: Fail if kubelet not active
+    ansible.builtin.fail:
+      msg: "kubelet is not running on {{ inventory_hostname }}"
+    when: kubelet_status.status.ActiveState != "active"
+
+  ####################################################################
+  # 3️⃣ Validate Required Ports
+  ####################################################################
+  - name: Check required ports on control plane
+    ansible.builtin.shell: |
+      ss -tuln | grep -w {{ item }}
+    register: port_check
+    failed_when: port_check.rc != 0
+    changed_when: false
+    loop: "{{ required_ports.control_plane }}"
+    when: "'control_plane' in group_names"
+
+  - name: Check required ports on worker
+    ansible.builtin.shell: |
+      ss -tuln | grep {{ item }}
+    register: worker_port_check
+    failed_when: worker_port_check.rc != 0
+    changed_when: false
+    loop: "{{ required_ports.worker }}"
+    when: "'workers' in group_names"
+
+  ####################################################################
+  # 4️⃣ Validate API Server Reachability (run only once)
+  ####################################################################
+  - name: Check API server reachable
+    ansible.builtin.command: >
+      kubectl --kubeconfig={{ kubeconfig_path }} get nodes
+    register: api_check
+    changed_when: false
+    failed_when: api_check.rc != 0
+    run_once: true
+    delegate_to: "{{ groups['control_plane'][0] }}"
+
+  ####################################################################
+  # 5️⃣ Validate Nodes Ready
+  ####################################################################
+  - name: Check all nodes are Ready
+    ansible.builtin.command: >
+      kubectl --kubeconfig={{ kubeconfig_path }} get nodes --no-headers
+    register: nodes_status
+    changed_when: false
+    run_once: true
+    delegate_to: "{{ groups['control_plane'][0] }}"
+
+  - name: Fail if any node not Ready
+    ansible.builtin.fail:
+      msg: "One or more nodes are NOT Ready"
+    when: "' NotReady' in nodes_status.stdout"
+    run_once: true
+
+  ####################################################################
+  # 6️⃣ Validate kube-system Pods
+  ####################################################################
+  - name: Check kube-system pods
+    ansible.builtin.command: >
+      kubectl --kubeconfig={{ kubeconfig_path }} get pods -n kube-system --no-headers
+    register: kube_system_pods
+    changed_when: false
+    run_once: true
+    delegate_to: "{{ groups['control_plane'][0] }}"
+
+  - name: Fail if any kube-system pod not Running
+    ansible.builtin.fail:
+      msg: "One or more kube-system pods are not Running"
+    when: "'Running' not in kube_system_pods.stdout"
+    run_once: true

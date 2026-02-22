@@ -1,0 +1,81 @@
+name: Ansible CI/CD Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  lint-and-test:
+    name: Ansible Lint & Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.11]
+
+    steps:
+
+    # ---------------------------------------------------
+    # 1️⃣ Checkout code
+    # ---------------------------------------------------
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    # ---------------------------------------------------
+    # 2️⃣ Set up Python
+    # ---------------------------------------------------
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    # ---------------------------------------------------
+    # 3️⃣ Install Ansible & Linting Tools
+    # ---------------------------------------------------
+    - name: Install Ansible and Molecule
+      run: |
+        python -m pip install --upgrade pip
+        pip install ansible==8.10.0 ansible-lint==6.28.0 molecule==5.5.2 yamllint
+
+    # ---------------------------------------------------
+    # 4️⃣ Validate Inventory YAML Files
+    # ---------------------------------------------------
+    - name: Lint Inventory Files
+      run: |
+        find inventories/ -type f -name '*.yml' -o -name '*.yaml' | xargs yamllint -d "{extends: relaxed, rules: {line-length: disable}}"
+
+    # ---------------------------------------------------
+    # 5️⃣ Lint Ansible Roles and Playbooks
+    # ---------------------------------------------------
+    - name: Run ansible-lint
+      run: |
+        ansible-lint playbooks/
+
+    # ---------------------------------------------------
+    # 6️⃣ Run Ansible Syntax Check
+    # ---------------------------------------------------
+    - name: Ansible Syntax Check
+      run: |
+        for playbook in playbooks/*.yml; do
+          ansible-playbook "$playbook" --syntax-check
+        done
+
+    # ---------------------------------------------------
+    # 7️⃣ Run Molecule Tests
+    # ---------------------------------------------------
+    - name: Run Molecule Tests
+      working-directory: roles
+      run: |
+        for role in */; do
+          if [ -f "$role/molecule/default/molecule.yml" ]; then
+            echo "Testing role $role"
+            cd "$role"
+            molecule test
+            cd -
+          fi
+        done

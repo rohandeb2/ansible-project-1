@@ -1,0 +1,88 @@
+---
+# ---------------------------------------------------
+# Identify first control plane
+# ---------------------------------------------------
+
+- name: Set first control plane
+  ansible.builtin.set_fact:
+    first_control_plane: "{{ groups['control_plane'][0] }}"
+
+# ---------------------------------------------------
+# Idempotency Check
+# ---------------------------------------------------
+
+- name: Check if worker already joined
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: worker_join_status
+
+# If kubelet.conf exists → already joined
+
+# ---------------------------------------------------
+# Retrieve Worker Join Command Securely
+# ---------------------------------------------------
+
+- name: Read worker join command from first control plane
+  ansible.builtin.slurp:
+    src: /etc/kubernetes/join/worker_join.sh
+  delegate_to: "{{ first_control_plane }}"
+  register: worker_join_raw
+  when: not worker_join_status.stat.exists
+
+- name: Decode worker join command
+  ansible.builtin.set_fact:
+    worker_join_command: "{{ worker_join_raw.content | b64decode }}"
+  when: not worker_join_status.stat.exists
+
+# ---------------------------------------------------
+# Wait for API Server (VIP) Availability
+# ---------------------------------------------------
+
+- name: Wait for API server to be reachable
+  ansible.builtin.wait_for:
+    host: "{{ control_plane_endpoint.split(':')[0] }}"
+    port: "{{ control_plane_endpoint.split(':')[1] | default(6443) }}"
+    timeout: 300
+    state: started
+  when: not worker_join_status.stat.exists
+
+# ---------------------------------------------------
+# Join Worker Node (With Retry)
+# ---------------------------------------------------
+
+- name: Join worker node to cluster
+  ansible.builtin.command: "{{ worker_join_command }}"
+  register: worker_join_result
+  retries: 5
+  delay: 20
+  until: worker_join_result.rc == 0
+  when: not worker_join_status.stat.exists
+  notify: Restart kubelet
+
+# ---------------------------------------------------
+# Ensure kubelet enabled and running
+# ---------------------------------------------------
+
+- name: Ensure kubelet enabled
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: true
+
+- name: Ensure kubelet running
+  ansible.builtin.systemd:
+    name: kubelet
+    state: started
+
+# ---------------------------------------------------
+# Verification: Node Registered
+# ---------------------------------------------------
+
+- name: Wait until node appears in cluster
+  ansible.builtin.command: >
+    kubectl get nodes --no-headers
+  delegate_to: "{{ first_control_plane }}"
+  register: node_list
+  retries: 10
+  delay: 15
+  until: inventory_hostname in node_list.stdout
+  changed_when: false

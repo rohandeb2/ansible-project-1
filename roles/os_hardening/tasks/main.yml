@@ -1,0 +1,134 @@
+---
+- name: Disable swap immediately
+  ansible.builtin.command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+  changed_when: false
+
+- name: Remove swap from /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^([^#].*\sswap\s+sw\s+.*)$'
+    replace: '# \1'
+  notify: Reload systemd daemon
+
+# ---------------------------------------------------
+# Install Required Security Packages
+# ---------------------------------------------------
+
+- name: Install security packages
+  ansible.builtin.apt:
+    name:
+      - auditd
+      - ufw
+      - libpam-pwquality
+    state: present
+    update_cache: yes
+
+- name: Enable and start auditd
+  ansible.builtin.systemd:
+    name: auditd
+    enabled: true
+    state: started
+
+# ---------------------------------------------------
+# Secure SSH Configuration
+# ---------------------------------------------------
+
+- name: Configure sshd securely
+  ansible.builtin.template:
+    src: sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    owner: root
+    group: root
+    mode: '0600'
+  notify: Restart SSH
+
+# ---------------------------------------------------
+# Password Policy
+# ---------------------------------------------------
+
+- name: Configure password quality requirements
+  ansible.builtin.lineinfile:
+    path: /etc/security/pwquality.conf
+    regexp: '^minlen'
+    line: "minlen = {{ password_min_length }}"
+    create: yes
+
+- name: Set password aging policy
+  ansible.builtin.command: >
+    chage --maxdays {{ password_max_days }}
+           --mindays {{ password_min_days }}
+           --warndays {{ password_warn_age }}
+           root
+  changed_when: false
+
+# ---------------------------------------------------
+# Kernel Modules
+# ---------------------------------------------------
+
+- name: Ensure kernel modules config file exists
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      {% for module in k8s_required_kernel_modules %}
+      {{ module }}
+      {% endfor %}
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Load kernel modules
+  ansible.builtin.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ k8s_required_kernel_modules }}"
+
+# ---------------------------------------------------
+# Sysctl Configuration
+# ---------------------------------------------------
+
+- name: Configure sysctl for Kubernetes security
+  ansible.builtin.template:
+    src: sysctl-k8s.conf.j2
+    dest: /etc/sysctl.d/99-kubernetes.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload sysctl
+
+# ---------------------------------------------------
+# Firewall Configuration
+# ---------------------------------------------------
+
+- name: Set UFW default policies
+  community.general.ufw:
+    state: enabled
+    policy: "{{ ufw_default_incoming_policy }}"
+    direction: incoming
+
+- name: Allow outgoing traffic
+  community.general.ufw:
+    policy: "{{ ufw_default_outgoing_policy }}"
+    direction: outgoing
+
+- name: Allow SSH
+  community.general.ufw:
+    rule: allow
+    port: "{{ ssh_port }}"
+    proto: tcp
+
+- name: Allow Control Plane ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: "{{ k8s_control_plane_ports }}"
+  when: "'control_plane' in group_names"
+
+- name: Allow Worker ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: "{{ k8s_worker_ports }}"
+  when: "'worker' in group_names"

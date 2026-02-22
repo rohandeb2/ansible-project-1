@@ -1,0 +1,136 @@
+---
+# ---------------------------------------------------
+# Ensure this runs only on first control plane node
+# ---------------------------------------------------
+
+- name: Set fact for first control plane
+  ansible.builtin.set_fact:
+    is_first_control_plane: "{{ inventory_hostname == groups['control_plane'][0] }}"
+
+- name: Skip if not first control plane
+  ansible.builtin.meta: end_play
+  when: not is_first_control_plane
+
+# ---------------------------------------------------
+# Install Kubernetes Packages (Version Pinned)
+# ---------------------------------------------------
+
+- name: Add Kubernetes apt key
+  ansible.builtin.get_url:
+    url: https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version | regex_replace('\\..*', '') }}/deb/Release.key
+    dest: /etc/apt/keyrings/kubernetes.asc
+    mode: '0644'
+
+- name: Add Kubernetes apt repository
+  ansible.builtin.apt_repository:
+    repo: >
+      deb [signed-by=/etc/apt/keyrings/kubernetes.asc]
+      https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version | regex_replace('\\..*', '') }}/deb/
+      /
+    state: present
+    filename: kubernetes
+
+- name: Install Kubernetes components
+  ansible.builtin.apt:
+    name:
+      - kubelet={{ kubernetes_version }}-*
+      - kubeadm={{ kubernetes_version }}-*
+      - kubectl={{ kubernetes_version }}-*
+    state: present
+    update_cache: yes
+
+- name: Hold Kubernetes packages
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+
+# ---------------------------------------------------
+# Check if cluster already initialized
+# ---------------------------------------------------
+
+- name: Check if Kubernetes already initialized
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: kubeadm_init_status
+
+# ---------------------------------------------------
+# Run kubeadm init (Only If Not Initialized)
+# ---------------------------------------------------
+
+- name: Run kubeadm init
+  ansible.builtin.command: >
+    kubeadm init
+    --kubernetes-version={{ kubernetes_version }}
+    --pod-network-cidr={{ pod_network_cidr }}
+    --service-cidr={{ kubernetes_service_cidr }}
+    --control-plane-endpoint={{ control_plane_endpoint }}
+    --upload-certs
+  register: kubeadm_init_output
+  when: not kubeadm_init_status.stat.exists
+  notify: Restart kubelet
+
+# ---------------------------------------------------
+# Configure kubeconfig for root
+# ---------------------------------------------------
+
+- name: Create .kube directory
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    mode: '0700'
+  when: not kubeadm_init_status.stat.exists
+
+- name: Copy admin.conf to kubeconfig
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0600'
+  when: not kubeadm_init_status.stat.exists
+
+# ---------------------------------------------------
+# Generate Join Command
+# ---------------------------------------------------
+
+- name: Generate worker join command
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: worker_join_command
+  changed_when: false
+
+- name: Generate control plane join command
+  ansible.builtin.command: >
+    kubeadm token create
+    --print-join-command
+    --certificate-key {{ kubeadm_certificate_key }}
+  register: control_plane_join_command
+  changed_when: false
+
+# ---------------------------------------------------
+# Store Join Commands Securely
+# ---------------------------------------------------
+
+- name: Create directory for join info
+  ansible.builtin.file:
+    path: /etc/kubernetes/join
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Store worker join command
+  ansible.builtin.copy:
+    content: "{{ worker_join_command.stdout }}"
+    dest: /etc/kubernetes/join/worker_join.sh
+    mode: '0600'
+
+- name: Store control plane join command
+  ansible.builtin.copy:
+    content: "{{ control_plane_join_command.stdout }} --control-plane"
+    dest: /etc/kubernetes/join/control_plane_join.sh
+    mode: '0600'
